@@ -1,0 +1,18 @@
+{
+  "name": "PSP Development (prebuilt image)",
+  // Use the official prebuilt PSP dev image to avoid building the toolchain during container creation.
+  // This image contains a ready-to-use PSP toolchain and is the fastest/most reliable option.
+  "image": "pspdev/pspdev:latest",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cpptools",
+        "ms-vscode.cmake-tools"
+      ]
+    }
+  },
+  // Quick verification command; it won't fail the build if toolchain is missing in the image.
+    "postCreateCommand": "bash -lc \"if command -v psp-gcc >/dev/null 2>&1; then psp-gcc --version; else echo 'psp-gcc not found in image'; fi\"",
+  "remoteUser": "root"
+}
+

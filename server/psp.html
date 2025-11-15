@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PSP Web Portal</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            margin: 0;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: rgba(0, 0, 0, 0.3);
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        h1 {
+            text-align: center;
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+        .subtitle {
+            text-align: center;
+            font-size: 1.2em;
+            opacity: 0.9;
+            margin-bottom: 30px;
+        }
+        .info-box {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        .info-box h2 {
+            margin-top: 0;
+            font-size: 1.5em;
+        }
+        .info-box p {
+            line-height: 1.6;
+            margin: 10px 0;
+        }
+        .feature-list {
+            list-style: none;
+            padding: 0;
+        }
+        .feature-list li {
+            padding: 10px;
+            margin: 5px 0;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 5px;
+        }
+        .feature-list li:before {
+            content: "✓ ";
+            color: #4ade80;
+            font-weight: bold;
+            margin-right: 10px;
+        }
+        .footer {
+            text-align: center;
+            margin-top: 30px;
+            opacity: 0.7;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎮 PSP Web Portal</h1>
+        <p class="subtitle">Welcome to the PSP Web File Browser</p>
+        
+        <div class="info-box">
+            <h2>About This Application</h2>
+            <p>You are viewing this page from your PSP Web File Browser application. This homebrew app enables your PSP to browse web pages and download files over Wi-Fi.</p>
+        </div>
+        
+        <div class="info-box">
+            <h2>Features</h2>
+            <ul class="feature-list">
+                <li>View web pages directly on your PSP</li>
+                <li>Browse available files from the server</li>
+                <li>Download files directly to your PSP memory stick</li>
+                <li>Simple and intuitive menu navigation</li>
+            </ul>
+        </div>
+        
+        <div class="info-box">
+            <h2>How to Use</h2>
+            <p><strong>Main Menu:</strong></p>
+            <ul class="feature-list">
+                <li>Use D-Pad Up/Down to navigate menu options</li>
+                <li>Press X to select an option</li>
+                <li>Press Circle to exit or go back</li>
+            </ul>
+            
+            <p><strong>File Browser:</strong></p>
+            <ul class="feature-list">
+                <li>Browse available files from the server</li>
+                <li>Select a file and press X to download</li>
+                <li>Files are saved to ms0:/PSP/GAME/</li>
+            </ul>
+        </div>
+        
+        <div class="info-box">
+            <h2>System Information</h2>
+            <p>Your PSP has successfully connected to the network and loaded this page. You can now use the file browser feature to download homebrew applications, themes, and other content.</p>
+        </div>
+        
+        <div class="footer">
+            <p>PSP Web File Browser v1.0</p>
+            <p>Built with PSP SDK</p>
+        </div>
+    </div>
+</body>
+</html>

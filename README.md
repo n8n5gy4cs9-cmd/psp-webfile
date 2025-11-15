@@ -1,6 +1,6 @@
-# PSP Hello World Homebrew
+# PSP Web File Browser
 
-This is a simple Hello World application for Sony PSP homebrew development.
+A PSP homebrew application that enables web browsing and file downloads over Wi-Fi. View web pages and download files directly to your PSP memory stick.
 
 ## Installation
 

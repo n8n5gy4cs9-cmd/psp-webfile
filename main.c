@@ -1,6 +1,6 @@
 /*
- * PSP Hello World Application
- * Displays "Hello World" on the PSP screen
+ * PSP Web File Browser
+ * View web pages and download files over HTTP
  */
 
 #include <pspkernel.h>
@@ -11,212 +11,226 @@
 #include <stdlib.h>
 #include <psppower.h>
 #include <pspiofilemgr.h>
+#include <pspnet.h>
+#include <pspnet_inet.h>
+#include <pspnet_apctl.h>
+#include <pspnet_resolver.h>
+#include <psputility.h>
+#include <psputility_netparam.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/select.h>
+#include <errno.h>
+#include <stdio.h>
 
-PSP_MODULE_INFO("HelloWorld", 0, 1, 0);
+PSP_MODULE_INFO("PSPWebFile", 0, 1, 0);
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
+PSP_HEAP_SIZE_KB(-1024);
 
 /* Define printf to use pspDebugScreenPrintf */
 #define printf pspDebugScreenPrintf
 
-/* ========================= Image + Base64 helpers ========================= */
+/* Menu states */
+typedef enum {
+    MENU_MAIN,
+    MENU_WEBVIEW,
+    MENU_FILELIST
+} MenuState;
 
-/* Helper for signed area (orientation) - defined at file scope for C89 compatibility */
-static int tri_sign(int ax,int ay,int bx,int by,int cx,int cy) {
-    return (ax - cx) * (by - cy) - (bx - cx) * (ay - cy);
-}
+/* Network connection state */
+static int net_initialized = 0;
 
-/* Minimal Base64 encode/decode */
-static const char B64_TBL[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+/* File list structure */
+#define MAX_FILES 100
+typedef struct {
+    char filename[256];
+} FileEntry;
 
-static char *b64_encode(const unsigned char *data, size_t len, size_t *out_len)
+static FileEntry file_list[MAX_FILES];
+static int file_count = 0;
+static int selected_file = 0;
+
+/* ========================= Network Functions ========================= */
+
+/* Initialize network */
+static int init_network(void)
 {
-    size_t olen = 4 * ((len + 2) / 3);
-    char *out = (char*)malloc(olen + 1);
-    if (!out) return NULL;
-    size_t i = 0, j = 0;
-    while (i < len) {
-        unsigned int v = data[i++] << 16;
-        if (i < len) v |= data[i++] << 8;
-        if (i < len) v |= data[i++];
-        out[j++] = B64_TBL[(v >> 18) & 0x3F];
-        out[j++] = B64_TBL[(v >> 12) & 0x3F];
-        out[j++] = (i > (len + 1)) ? '=' : B64_TBL[(v >> 6) & 0x3F];
-        out[j++] = (i > len) ? '=' : B64_TBL[v & 0x3F];
+    int err;
+    
+    if (net_initialized) return 0;
+    
+    /* Load network modules */
+    err = sceUtilityLoadNetModule(PSP_NET_MODULE_COMMON);
+    if (err < 0) return err;
+    
+    err = sceUtilityLoadNetModule(PSP_NET_MODULE_INET);
+    if (err < 0) return err;
+    
+    /* Initialize network */
+    err = sceNetInit(128*1024, 42, 0, 42, 0);
+    if (err < 0) return err;
+    
+    err = sceNetInetInit();
+    if (err < 0) return err;
+    
+    err = sceNetApctlInit(0x10000, 48);
+    if (err < 0) return err;
+    
+    net_initialized = 1;
+    return 0;
+}
+
+/* Connect to access point */
+static int connect_to_ap(void)
+{
+    int err;
+    int state = 0;
+    
+    /* Get first connection config */
+    err = sceNetApctlConnect(1);
+    if (err < 0) {
+        return err;
     }
-    out[j] = '\0';
-    if (out_len) *out_len = j;
-    return out;
-}
-
-static int b64_idx(char c) {
-    if (c >= 'A' && c <= 'Z') return c - 'A';
-    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
-    if (c >= '0' && c <= '9') return c - '0' + 52;
-    if (c == '+') return 62;
-    if (c == '/') return 63;
-    return -1;
-}
-
-static unsigned char* b64_decode(const char* in, size_t inlen, size_t* outlen) {
-    unsigned char* out = (unsigned char*)malloc((inlen / 4 + 1) * 3);
-    if (!out) return NULL;
-
-    size_t o = 0;
-    int val = 0, valb = -8;
-    for (size_t i = 0; i < inlen; i++) {
-        unsigned char c = (unsigned char)in[i];
-        if (c == '=') break;
-        int d = b64_idx((char)c);
-        if (d < 0) continue; /* skip whitespace/invalid */
-        val = (val << 6) | d;
-        valb += 6;
-        if (valb >= 0) {
-            out[o++] = (unsigned char)((val >> valb) & 0xFF);
-            valb -= 8;
+    
+    /* Wait for connection */
+    while (1) {
+        err = sceNetApctlGetState(&state);
+        if (err < 0) return err;
+        
+        if (state == PSP_NET_APCTL_STATE_GOT_IP) {
+            break;
         }
+        
+        sceKernelDelayThread(50000); /* 50ms */
     }
-    if (outlen) *outlen = o;
-    return out;
+    
+    return 0;
 }
 
-/* Draw an RGBA8888 image to current framebuffer, converting to destination format if needed */
-static void blit_rgba8888_to_screen(int dstX, int dstY, int width, int height, const unsigned char* rgba, size_t rgba_len)
+/* Simple HTTP GET request */
+static char* http_get(const char* url, int* out_len)
 {
-    if (!rgba || rgba_len < (size_t)(width * height * 4)) return;
-
-    void* topaddr = NULL;
-    int bufferwidth = 0;
-    int pixelformat = 0;
-
-    if (sceDisplayGetFrameBuf(&topaddr, &bufferwidth, &pixelformat, PSP_DISPLAY_SETBUF_IMMEDIATE) < 0) return;
-    if (!topaddr || bufferwidth <= 0) return;
-
-    if (pixelformat == PSP_DISPLAY_PIXEL_FORMAT_565) {
-        volatile unsigned short* vram = (volatile unsigned short*)topaddr;
-        for (int y = 0; y < height; y++) {
-            int sy = dstY + y; if (sy < 0 || sy >= 272) continue;
-            volatile unsigned short* row = vram + (sy * bufferwidth);
-            for (int x = 0; x < width; x++) {
-                int sx = dstX + x; if (sx < 0 || sx >= 480) continue;
-                const unsigned char* p = rgba + (y * width + x) * 4;
-                unsigned char r = p[0], g = p[1], b = p[2], a = p[3];
-                if (a == 0) continue; /* respect transparency */
-                /* Compose standard RGB565; VRAM is little-endian but writing as 16-bit handles endianness */
-                unsigned short rgb565 = (unsigned short)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
-                row[sx] = rgb565;
-            }
+    char hostname[256];
+    char path[512];
+    int port = 80;
+    int sock;
+    struct sockaddr_in addr;
+    char request[1024];
+    char* response = NULL;
+    int response_size = 0;
+    int response_capacity = 4096;
+    
+    /* Parse URL - assume http://hostname/path format */
+    if (strncmp(url, "http://", 7) == 0) {
+        const char* start = url + 7;
+        const char* slash = strchr(start, '/');
+        
+        if (slash) {
+            int hostlen = slash - start;
+            strncpy(hostname, start, hostlen);
+            hostname[hostlen] = '\0';
+            strcpy(path, slash);
+        } else {
+            strcpy(hostname, start);
+            strcpy(path, "/");
         }
     } else {
-        /* Default to 8888 (0xAARRGGBB) */
-        volatile unsigned int* vram = (volatile unsigned int*)topaddr;
-        for (int y = 0; y < height; y++) {
-            int sy = dstY + y; if (sy < 0 || sy >= 272) continue;
-            volatile unsigned int* row = vram + (sy * bufferwidth);
-            for (int x = 0; x < width; x++) {
-                int sx = dstX + x; if (sx < 0 || sx >= 480) continue;
-                const unsigned char* p = rgba + (y * width + x) * 4;
-                unsigned char r = p[0], g = p[1], b = p[2], a = p[3];
-                if (a == 0) continue;
-                /* Many setups expect 0xAABBGGRR in VRAM due to little-endian; swap R/B here */
-                unsigned int abgr = ((unsigned int)a << 24) | ((unsigned int)b << 16) | ((unsigned int)g << 8) | (unsigned int)r;
-                row[sx] = abgr;
-            }
-        }
+        return NULL;
     }
+    
+    /* Create socket */
+    sock = sceNetInetSocket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) return NULL;
+    
+    /* Resolve hostname */
+    struct in_addr ip;
+    if (sceNetInetInetAton(hostname, &ip) == 0) {
+        /* Need DNS resolution */
+        int rid;
+        char buf[1024];
+        if (sceNetResolverCreate(&rid, buf, sizeof(buf)) < 0) {
+            sceNetInetClose(sock);
+            return NULL;
+        }
+        
+        if (sceNetResolverStartNtoA(rid, hostname, &ip, 2, 3) < 0) {
+            sceNetResolverDelete(rid);
+            sceNetInetClose(sock);
+            return NULL;
+        }
+        sceNetResolverDelete(rid);
+    }
+    
+    /* Connect */
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr = ip;
+    
+    if (sceNetInetConnect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        sceNetInetClose(sock);
+        return NULL;
+    }
+    
+    /* Send request */
+    snprintf(request, sizeof(request),
+        "GET %s HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        path, hostname);
+    
+    sceNetInetSend(sock, request, strlen(request), 0);
+    
+    /* Receive response */
+    response = (char*)malloc(response_capacity);
+    if (!response) {
+        sceNetInetClose(sock);
+        return NULL;
+    }
+    
+    while (1) {
+        char buf[1024];
+        int n = sceNetInetRecv(sock, buf, sizeof(buf), 0);
+        
+        if (n <= 0) break;
+        
+        if (response_size + n >= response_capacity) {
+            response_capacity *= 2;
+            char* new_response = (char*)realloc(response, response_capacity);
+            if (!new_response) {
+                free(response);
+                sceNetInetClose(sock);
+                return NULL;
+            }
+            response = new_response;
+        }
+        
+        memcpy(response + response_size, buf, n);
+        response_size += n;
+    }
+    
+    sceNetInetClose(sock);
+    
+    if (response_size > 0) {
+        response[response_size] = '\0';
+        if (out_len) *out_len = response_size;
+        return response;
+    }
+    
+    free(response);
+    return NULL;
 }
 
-/* Generate a simple yellow warning triangle with black border and exclamation mark into RGBA8888 buffer */
-static unsigned char* gen_warning_icon_rgba(int w, int h)
+/* Extract body from HTTP response */
+static char* extract_http_body(const char* response)
 {
-    if (w <= 0 || h <= 0) return NULL;
-    size_t sz = (size_t)w * h * 4;
-    unsigned char* buf = (unsigned char*)malloc(sz);
-    if (!buf) return NULL;
-    memset(buf, 0, sz);
-
-    /* Triangle vertices */
-    int x0 = w / 2, y0 = 1;       /* top */
-    int x1 = 1,     y1 = h - 2;   /* bottom-left */
-    int x2 = w - 2, y2 = h - 2;   /* bottom-right */
-
-    /* Fill triangle */
-    for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-            int p = (y * w + x) * 4;
-            int s1 = tri_sign(x, y, x1, y1, x0, y0);
-            int s2 = tri_sign(x, y, x2, y2, x1, y1);
-            int s3 = tri_sign(x, y, x0, y0, x2, y2);
-            int has_neg = (s1 < 0) || (s2 < 0) || (s3 < 0);
-            int has_pos = (s1 > 0) || (s2 > 0) || (s3 > 0);
-            int inside = !(has_neg && has_pos);
-            if (inside) {
-                /* Check border by testing 4-neighborhood */
-                int border = 0;
-                int nx[4] = {x-1, x+1, x, x};
-                int ny[4] = {y, y, y-1, y+1};
-                for (int k=0;k<4;k++) {
-                    int xx = nx[k], yy = ny[k];
-                    if (xx < 0 || yy < 0 || xx >= w || yy >= h) { border = 1; break; }
-                    int ss1 = tri_sign(xx, yy, x1, y1, x0, y0);
-                    int ss2 = tri_sign(xx, yy, x2, y2, x1, y1);
-                    int ss3 = tri_sign(xx, yy, x0, y0, x2, y2);
-                    int n_has_neg = (ss1 < 0) || (ss2 < 0) || (ss3 < 0);
-                    int n_has_pos = (ss1 > 0) || (ss2 > 0) || (ss3 > 0);
-                    int n_inside = !(n_has_neg && n_has_pos);
-                    if (!n_inside) { border = 1; break; }
-                }
-                if (border) {
-                    /* black border */
-                    buf[p+0] = 0; buf[p+1] = 0; buf[p+2] = 0; buf[p+3] = 255;
-                } else {
-                    /* yellow fill */
-                    buf[p+0] = 255; buf[p+1] = 208; buf[p+2] = 0; buf[p+3] = 255;
-                }
-            }
-        }
+    const char* body = strstr(response, "\r\n\r\n");
+    if (body) {
+        body += 4;
+        return strdup(body);
     }
-
-    /* Exclamation mark */
-    int cx = w/2;
-    int lineTop = (int)(h * 0.35f);
-    int lineBot = (int)(h * 0.68f);
-    for (int y = lineTop; y <= lineBot; y++) {
-        for (int dx = -1; dx <= 1; dx++) {
-            int x = cx + dx; if (x < 0 || x >= w || y < 0 || y >= h) continue;
-            int p = (y * w + x) * 4;
-            buf[p+0] = 0; buf[p+1] = 0; buf[p+2] = 0; buf[p+3] = 255;
-        }
-    }
-    /* Dot */
-    int dy = (int)(h * 0.80f);
-    for (int y = dy; y < dy + 2 && y < h; y++) {
-        for (int x = cx-1; x <= cx; x++) {
-            if (x < 0 || x >= w) continue;
-            int p = (y * w + x) * 4;
-            buf[p+0] = 0; buf[p+1] = 0; buf[p+2] = 0; buf[p+3] = 255;
-        }
-    }
-
-    return buf;
-}
-
-/* Convenience: generate -> base64 -> decode -> blit */
-static void draw_warning_icon_b64(int x, int y, int w, int h)
-{
-    unsigned char *rgba = gen_warning_icon_rgba(w, h);
-    if (!rgba) return;
-    size_t img_sz = (size_t)w * h * 4;
-    size_t b64_len = 0;
-    char *b64 = b64_encode(rgba, img_sz, &b64_len);
-    if (!b64) { free(rgba); return; }
-    size_t dec_len = 0;
-    unsigned char *decoded = b64_decode(b64, b64_len, &dec_len);
-    if (decoded && dec_len == img_sz) {
-        blit_rgba8888_to_screen(x, y, w, h, decoded, dec_len);
-    }
-    if (decoded) free(decoded);
-    free(b64);
-    free(rgba);
+    return NULL;
 }
 
 /* Exit callback */
@@ -253,237 +267,347 @@ int SetupCallbacks(void)
     return thid;
 }
 
+/* Display main menu */
+static void draw_main_menu(int selected)
+{
+    pspDebugScreenClear();
+    pspDebugScreenSetXY(0, 2);
+    
+    printf("  =====================================\n");
+    printf("       PSP WEB FILE BROWSER\n");
+    printf("  =====================================\n\n");
+    
+    if (selected == 0) {
+        printf("  > 1. View Web Page\n");
+    } else {
+        printf("    1. View Web Page\n");
+    }
+    
+    if (selected == 1) {
+        printf("  > 2. Browse & Download Files\n");
+    } else {
+        printf("    2. Browse & Download Files\n");
+    }
+    
+    printf("\n\n");
+    printf("  D-Pad Up/Down: Navigate\n");
+    printf("  X: Select\n");
+    printf("  Circle: Exit\n");
+    printf("\n");
+    
+    if (net_initialized) {
+        printf("  Network: Connected\n");
+    } else {
+        printf("  Network: Not connected\n");
+    }
+}
+
+/* Display web page view */
+static void view_webpage(void)
+{
+    pspDebugScreenClear();
+    pspDebugScreenSetXY(0, 1);
+    
+    printf("  Loading http://softa.site/psp ...\n\n");
+    
+    int len;
+    char* response = http_get("http://softa.site/psp", &len);
+    
+    if (response) {
+        char* body = extract_http_body(response);
+        if (body) {
+            /* Display first 30 lines of content */
+            printf("  Page Content:\n");
+            printf("  =====================================\n");
+            
+            int lines = 0;
+            char* line = strtok(body, "\n");
+            while (line && lines < 25) {
+                printf("  %s\n", line);
+                line = strtok(NULL, "\n");
+                lines++;
+            }
+            
+            free(body);
+        }
+        free(response);
+        
+        printf("\n  Press Circle to return to menu\n");
+    } else {
+        printf("  Error: Could not load page\n");
+        printf("  Check your network connection\n\n");
+        printf("  Press Circle to return to menu\n");
+    }
+}
+
+/* Fetch and parse file list */
+static void fetch_file_list(void)
+{
+    file_count = 0;
+    
+    int len;
+    char* response = http_get("http://softa.site/pspfiles", &len);
+    
+    if (!response) return;
+    
+    char* body = extract_http_body(response);
+    if (!body) {
+        free(response);
+        return;
+    }
+    
+    /* Parse file list - expect one filename per line */
+    char* line = strtok(body, "\n\r");
+    while (line && file_count < MAX_FILES) {
+        /* Skip empty lines */
+        while (*line == ' ' || *line == '\t') line++;
+        if (*line != '\0') {
+            strncpy(file_list[file_count].filename, line, 255);
+            file_list[file_count].filename[255] = '\0';
+            file_count++;
+        }
+        line = strtok(NULL, "\n\r");
+    }
+    
+    free(body);
+    free(response);
+}
+
+/* Display file list browser */
+static void browse_files(void)
+{
+    int scroll_offset = 0;
+    int need_refresh = 1;
+    
+    pspDebugScreenClear();
+    pspDebugScreenSetXY(0, 1);
+    printf("  Fetching file list...\n");
+    
+    fetch_file_list();
+    
+    if (file_count == 0) {
+        pspDebugScreenClear();
+        pspDebugScreenSetXY(0, 1);
+        printf("  No files found or connection error\n\n");
+        printf("  Press Circle to return to menu\n");
+        
+        SceCtrlData pad;
+        while (1) {
+            sceCtrlReadBufferPositive(&pad, 1);
+            if (pad.Buttons & PSP_CTRL_CIRCLE) break;
+            sceDisplayWaitVblankStart();
+        }
+        return;
+    }
+    
+    SceCtrlData pad;
+    SceCtrlData oldpad;
+    memset(&oldpad, 0, sizeof(oldpad));
+    
+    while (1) {
+        if (need_refresh) {
+            pspDebugScreenClear();
+            pspDebugScreenSetXY(0, 1);
+            
+            printf("  File Browser (%d files)\n", file_count);
+            printf("  =====================================\n\n");
+            
+            /* Display 20 files at a time */
+            int max_display = 20;
+            if (selected_file < scroll_offset) {
+                scroll_offset = selected_file;
+            }
+            if (selected_file >= scroll_offset + max_display) {
+                scroll_offset = selected_file - max_display + 1;
+            }
+            
+            for (int i = scroll_offset; i < scroll_offset + max_display && i < file_count; i++) {
+                if (i == selected_file) {
+                    printf("  > %s\n", file_list[i].filename);
+                } else {
+                    printf("    %s\n", file_list[i].filename);
+                }
+            }
+            
+            printf("\n  =====================================\n");
+            printf("  Up/Down: Navigate | X: Download\n");
+            printf("  Circle: Back to menu\n");
+            
+            need_refresh = 0;
+        }
+        
+        sceCtrlReadBufferPositive(&pad, 1);
+        
+        if ((pad.Buttons & PSP_CTRL_UP) && !(oldpad.Buttons & PSP_CTRL_UP)) {
+            if (selected_file > 0) {
+                selected_file--;
+                need_refresh = 1;
+            }
+        }
+        
+        if ((pad.Buttons & PSP_CTRL_DOWN) && !(oldpad.Buttons & PSP_CTRL_DOWN)) {
+            if (selected_file < file_count - 1) {
+                selected_file++;
+                need_refresh = 1;
+            }
+        }
+        
+        if ((pad.Buttons & PSP_CTRL_CROSS) && !(oldpad.Buttons & PSP_CTRL_CROSS)) {
+            /* Download selected file */
+            pspDebugScreenSetXY(0, 28);
+            printf("  Downloading %s ...", file_list[selected_file].filename);
+            
+            char url[512];
+            snprintf(url, sizeof(url), "http://softa.site/pspfiles/%s", 
+                     file_list[selected_file].filename);
+            
+            int len;
+            char* data = http_get(url, &len);
+            
+            if (data) {
+                char* body = extract_http_body(data);
+                if (body) {
+                    /* Save to ms0:/PSP/GAME/ */
+                    char filepath[512];
+                    snprintf(filepath, sizeof(filepath), "ms0:/PSP/GAME/%s",
+                             file_list[selected_file].filename);
+                    
+                    SceUID fd = sceIoOpen(filepath, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
+                    if (fd >= 0) {
+                        sceIoWrite(fd, body, strlen(body));
+                        sceIoClose(fd);
+                        pspDebugScreenSetXY(0, 29);
+                        printf("  Downloaded to %s", filepath);
+                    } else {
+                        pspDebugScreenSetXY(0, 29);
+                        printf("  Error: Could not save file");
+                    }
+                    free(body);
+                } else {
+                    pspDebugScreenSetXY(0, 29);
+                    printf("  Error: Invalid response");
+                }
+                free(data);
+            } else {
+                pspDebugScreenSetXY(0, 29);
+                printf("  Error: Download failed");
+            }
+            
+            sceKernelDelayThread(2000000); /* Wait 2 seconds */
+            need_refresh = 1;
+        }
+        
+        if (pad.Buttons & PSP_CTRL_CIRCLE) {
+            break;
+        }
+        
+        oldpad = pad;
+        sceDisplayWaitVblankStart();
+    }
+}
+
 int main(void)
 {
     SceCtrlData pad;
     SceCtrlData oldpad;
     memset(&oldpad, 0, sizeof(oldpad));
     
-    /* Background color cycling for dead pixel testing */
-    int bg_index = 0;
-    unsigned int bg_colors[] = {
-        0x00000000,  /* Black (default) */
-        0x000000FF,  /* Red */
-        0x0000FF00,  /* Green */
-        0x00FF0000,  /* Blue */
-        0x00FFFF00,  /* Cyan */
-        0x00FF00FF,  /* Magenta */
-        0x0000FFFF,  /* Yellow */
-        0x00FFFFFF   /* White */
-    };
-    int num_bg_colors = sizeof(bg_colors) / sizeof(bg_colors[0]);
+    MenuState state = MENU_MAIN;
+    int menu_selection = 0;
+    int need_redraw = 1;
     
     /* Set up callbacks */
     SetupCallbacks();
-
+    
     /* Initialize the debug screen */
     pspDebugScreenInit();
-
-    /* Debug: report current framebuffer pixel format once */
-    {
-        void* topaddr = NULL; int bw = 0; int pf = 0;
-        if (sceDisplayGetFrameBuf(&topaddr, &bw, &pf, PSP_DISPLAY_SETBUF_IMMEDIATE) >= 0) {
-            printf("\n[debug] pixelformat=%d (0=565, 1=5551, 2=4444, 3=8888)\n", pf);
-        }
-    }
-
-    /* Clear screen and set cursor to top-left */
     pspDebugScreenClear();
-    pspDebugScreenSetXY(0, 0);
-
-    /* Display Hello World message */
-    printf("\n\n");
-    printf("  =====================================\n");
-    printf("       PSP CROWELIAN - HELLO WORLD     \n");
-    printf("  =====================================\n\n");
-    printf("  Hello World!\n\n");
-    printf("  Welcome Harris PSP world!\n\n");
-    printf("  Press X to exit.\n\n");
-    printf("  Press Triangle to cycle background.\n\n");
-    printf("  =====================================\n");
-
-    /* --- 3–4 blank lines before specs --- */
-    printf("\n\n\n");
-
-    /* PSP specs (user-mode accessible) */
-    {
-        /* Firmware (devkit) version */
-        unsigned int dv = sceKernelDevkitVersion();
-        int fw_major = (dv >> 24) & 0xFF;
-        int fw_minor = (dv >> 16) & 0xFF;
-        int fw_rev   = dv & 0xFFFF;
-
-        /* Display info */
-        int mode = 0, dw = 0, dh = 0;
-        sceDisplayGetMode(&mode, &dw, &dh);
-        void* topaddr2 = NULL; int bw2 = 0; int pf2 = 0;
-        sceDisplayGetFrameBuf(&topaddr2, &bw2, &pf2, PSP_DISPLAY_SETBUF_IMMEDIATE);
-
-        /* CPU/bus clocks */
-        int cpu_clk = scePowerGetCpuClockFrequencyInt();
-        int bus_clk = scePowerGetBusClockFrequencyInt();
-
-        /* Memory (user-mode heap) */
-        SceSize max_free = sceKernelMaxFreeMemSize();
-        SceSize tot_free = sceKernelTotalFreeMemSize();
-
-        /* Battery status */
-        int bat_exist = scePowerIsBatteryExist();
-        int on_ac     = scePowerIsPowerOnline();
-        int charging  = scePowerIsBatteryCharging();
-        int bat_pct   = scePowerGetBatteryLifePercent();
-
-        printf("  PSP Specs:\n");
-        printf("   - Firmware (devkit): %d.%d (rev 0x%04X)\n", fw_major, fw_minor, fw_rev);
-        printf("   - Display: %dx%d, bufferwidth=%d, pixelfmt=%d \n       (0=565,1=5551,2=4444,3=8888)\n", dw, dh, bw2, pf2);
-        printf("   - Clocks: CPU=%d MHz, BUS=%d MHz\n", cpu_clk, bus_clk);
-        printf("   - Memory: max free=%lu KB, total free=%lu KB\n",
-               (unsigned long)(max_free/1024), (unsigned long)(tot_free/1024));
-        if (bat_exist)
-            printf("   - Battery: %d%%, AC=%s, Charging=%s\n",
-                   bat_pct, on_ac ? "Yes" : "No", charging ? "Yes" : "No");
-        else
-            printf("   - Battery: Not present (AC/emulator)\n");
-
-        /* Best-effort model guess (user-mode heuristics) */
-        {
-            int is_go = 0;
-            SceUID dfd = sceIoDopen("ef0:/");
-            if (dfd >= 0) { is_go = 1; sceIoDclose(dfd); }
-
-            unsigned long free_kb = (unsigned long)(tot_free / 1024);
-            int is_ppsspp = 0;
-            /* PPSSPP often reports unusually high free memory or 0% battery */
-            if (free_kb > 100000UL || (!bat_exist && tot_free > 60*1024*1024)) {
-                is_ppsspp = 1;
-            }
-
-            if (is_ppsspp) {
-                printf("   - Model (guess): PPSSPP Emulator\n");
-            } else if (is_go) {
-                printf("   - Model (guess): PSP Go (N1000)\n");
-            } else if (free_kb > 40000UL) {
-                printf("   - Model (guess): 64MB model (PSP-2000/3000/E1000)\n");
-            } else {
-                printf("   - Model (guess): 32MB model (PSP-1000)\n");
-            }
-            if (!is_ppsspp) {
-                printf("   - Note: Exact 2000 vs 3000 and LCD panel require\n");
-                printf("           kernel tools (PSPident) for definitive info.\n");
-            }
+    
+    /* Initialize network */
+    pspDebugScreenSetXY(0, 10);
+    printf("  Initializing network...\n");
+    
+    if (init_network() == 0) {
+        printf("  Connecting to access point...\n");
+        if (connect_to_ap() == 0) {
+            printf("  Connected!\n");
+            sceKernelDelayThread(1000000); /* Wait 1 second */
+        } else {
+            printf("  Connection failed!\n");
+            printf("  Some features may not work.\n");
+            sceKernelDelayThread(2000000); /* Wait 2 seconds */
         }
+    } else {
+        printf("  Network initialization failed!\n");
+        printf("  Some features may not work.\n");
+        sceKernelDelayThread(2000000); /* Wait 2 seconds */
     }
-
-    /* Draw a yellow warning icon (generated -> base64 -> decoded) */
-    draw_warning_icon_b64(240, 108, 24, 24);
-
+    
     /* Main loop */
-    while(1)
-    {
-        /* Read controller input */
-        sceCtrlReadBufferPositive(&pad, 1);
-
-        /* Triangle button: cycle background color for dead pixel testing */
-        if ((pad.Buttons & PSP_CTRL_TRIANGLE) && !(oldpad.Buttons & PSP_CTRL_TRIANGLE)) {
-            bg_index = (bg_index + 1) % num_bg_colors;
+    while (1) {
+        if (state == MENU_MAIN) {
+            if (need_redraw) {
+                draw_main_menu(menu_selection);
+                need_redraw = 0;
+            }
             
-            /* Clear screen with new background color */
-            pspDebugScreenSetBackColor(bg_colors[bg_index]);
-            pspDebugScreenClear();
-            pspDebugScreenSetXY(0, 0);
+            sceCtrlReadBufferPositive(&pad, 1);
             
-            /* Redraw everything */
-            printf("\n\n");
-            printf("  =====================================\n");
-            printf("       PSP CROWELIAN - HELLO WORLD     \n");
-            printf("  =====================================\n\n");
-            printf("  Hello World!\n\n");
-            printf("  Welcome Harris PSP world!\n\n");
-            printf("  Press X to exit.\n");
-            printf("  Press Triangle to cycle background.\n\n");
-            printf("  =====================================\n");
-            
-            printf("\n\n\n");
-            
-            /* Redraw specs block */
-            {
-                unsigned int dv = sceKernelDevkitVersion();
-                int fw_major = (dv >> 24) & 0xFF;
-                int fw_minor = (dv >> 16) & 0xFF;
-                int fw_rev   = dv & 0xFFFF;
-                int mode = 0, dw = 0, dh = 0;
-                sceDisplayGetMode(&mode, &dw, &dh);
-                void* topaddr2 = NULL; int bw2 = 0; int pf2 = 0;
-                sceDisplayGetFrameBuf(&topaddr2, &bw2, &pf2, PSP_DISPLAY_SETBUF_IMMEDIATE);
-                int cpu_clk = scePowerGetCpuClockFrequencyInt();
-                int bus_clk = scePowerGetBusClockFrequencyInt();
-                SceSize max_free = sceKernelMaxFreeMemSize();
-                SceSize tot_free = sceKernelTotalFreeMemSize();
-                int bat_exist = scePowerIsBatteryExist();
-                int on_ac = scePowerIsPowerOnline();
-                int charging = scePowerIsBatteryCharging();
-                int bat_pct = scePowerGetBatteryLifePercent();
-                
-                printf("  PSP Specs:\n");
-                printf("   - Firmware (devkit): %d.%d (rev 0x%04X)\n", fw_major, fw_minor, fw_rev);
-                printf("   - Display: %dx%d, bufferwidth=%d, pixelfmt=%d \n       (0=565,1=5551,2=4444,3=8888)\n", dw, dh, bw2, pf2);
-                printf("   - Clocks: CPU=%d MHz, BUS=%d MHz\n", cpu_clk, bus_clk);
-                printf("   - Memory: max free=%lu KB, total free=%lu KB\n",
-                       (unsigned long)(max_free/1024), (unsigned long)(tot_free/1024));
-                if (bat_exist)
-                    printf("   - Battery: %d%%, AC=%s, Charging=%s\n",
-                           bat_pct, on_ac ? "Yes" : "No", charging ? "Yes" : "No");
-                else
-                    printf("   - Battery: Not present (AC/emulator)\n");
-                
-                {
-                    int is_go = 0;
-                    SceUID dfd = sceIoDopen("ef0:/");
-                    if (dfd >= 0) { is_go = 1; sceIoDclose(dfd); }
-                    unsigned long free_kb = (unsigned long)(tot_free / 1024);
-                    int is_ppsspp = 0;
-                    if (free_kb > 100000UL || (!bat_exist && tot_free > 60*1024*1024)) {
-                        is_ppsspp = 1;
-                    }
-                    if (is_ppsspp) {
-                        printf("   - Model (guess): PPSSPP Emulator\n");
-                    } else if (is_go) {
-                        printf("   - Model (guess): PSP Go (N1000)\n");
-                    } else if (free_kb > 40000UL) {
-                        printf("   - Model (guess): 64MB model (PSP-2000/3000/E1000)\n");
-                    } else {
-                        printf("   - Model (guess): 32MB model (PSP-1000)\n");
-                    }
-                    if (!is_ppsspp) {
-                        printf("   - Note: Exact 2000 vs 3000 and LCD panel require\n");
-                        printf("           kernel tools (PSPident) for definitive info.\n");
-                    }
+            if ((pad.Buttons & PSP_CTRL_UP) && !(oldpad.Buttons & PSP_CTRL_UP)) {
+                if (menu_selection > 0) {
+                    menu_selection--;
+                    need_redraw = 1;
                 }
             }
             
-            /* Redraw warning icon */
-            draw_warning_icon_b64(240, 108, 24, 24);
+            if ((pad.Buttons & PSP_CTRL_DOWN) && !(oldpad.Buttons & PSP_CTRL_DOWN)) {
+                if (menu_selection < 1) {
+                    menu_selection++;
+                    need_redraw = 1;
+                }
+            }
             
-            /* Show current background color name */
-            const char* color_names[] = {
-                "Black", "Red", "Green", "Blue", "Cyan", "Magenta", "Yellow", "White"
-            };
-            printf("\n  BG Color: %s (%d/%d)\n", color_names[bg_index], bg_index + 1, num_bg_colors);
+            if ((pad.Buttons & PSP_CTRL_CROSS) && !(oldpad.Buttons & PSP_CTRL_CROSS)) {
+                if (menu_selection == 0) {
+                    state = MENU_WEBVIEW;
+                } else if (menu_selection == 1) {
+                    state = MENU_FILELIST;
+                }
+            }
+            
+            if (pad.Buttons & PSP_CTRL_CIRCLE) {
+                break;
+            }
+        } else if (state == MENU_WEBVIEW) {
+            view_webpage();
+            
+            /* Wait for Circle to return */
+            while (1) {
+                sceCtrlReadBufferPositive(&pad, 1);
+                if (pad.Buttons & PSP_CTRL_CIRCLE) break;
+                sceDisplayWaitVblankStart();
+            }
+            
+            state = MENU_MAIN;
+            need_redraw = 1;
+        } else if (state == MENU_FILELIST) {
+            browse_files();
+            state = MENU_MAIN;
+            need_redraw = 1;
         }
-
-        /* Check if X button is pressed */
-        if(pad.Buttons & PSP_CTRL_CROSS)
-        {
-            break;
-        }
-
+        
         oldpad = pad;
-
-        /* Wait a bit before next check */
         sceDisplayWaitVblankStart();
     }
-
-    /* Exit */
+    
+    /* Cleanup */
+    if (net_initialized) {
+        sceNetApctlDisconnect();
+        sceNetApctlTerm();
+        sceNetInetTerm();
+        sceNetTerm();
+    }
+    
     sceKernelExitGame();
     return 0;
 }

@@ -1,0 +1,29 @@
+# .htaccess for PSP Web File Browser Server
+# Place this file in your web root at softa.site
+
+RewriteEngine On
+
+# Serve psp.html at /psp endpoint
+RewriteRule ^psp$ psp.html [L]
+
+# Serve pspfiles.php at /pspfiles endpoint
+RewriteRule ^pspfiles$ pspfiles.php [L]
+
+# Serve files from files/ directory when accessed via /pspfiles/filename
+RewriteRule ^pspfiles/(.+)$ files/$1 [L]
+
+# Enable CORS for PSP client (optional, if needed)
+<IfModule mod_headers.c>
+    Header set Access-Control-Allow-Origin "*"
+    Header set Access-Control-Allow-Methods "GET, OPTIONS"
+    Header set Access-Control-Allow-Headers "Content-Type"
+</IfModule>
+
+# Prevent directory listing
+Options -Indexes
+
+# Allow access to specific file types
+<FilesMatch "\.(pbp|zip|txt|jpg|png|gif|html|php)$">
+    Order allow,deny
+    Allow from all
+</FilesMatch>

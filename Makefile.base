@@ -4,7 +4,7 @@
 
 ROOT ?= ..
 
-TARGET = HelloWorld
+TARGET = PSPWebFile
 
 # Look for sources in project root; objects are emitted in current dir (build/)
 VPATH := $(ROOT)
@@ -18,10 +18,10 @@ ASFLAGS = $(CFLAGS)
 
 LIBDIR =
 LDFLAGS =
-LIBS = -lpsppower
+LIBS = -lpsppower -lpspnet -lpspnet_inet -lpspnet_apctl -lpspnet_resolver -lpsputility
 
 EXTRA_TARGETS = EBOOT.PBP
-PSP_EBOOT_TITLE = Hello World
+PSP_EBOOT_TITLE = PSP Web File Browser
 # Use menu assets from the project root
 PSP_EBOOT_ICON = $(ROOT)/assets/ICON0.PNG
 PSP_EBOOT_PIC1 = $(ROOT)/assets/PIC1.PNG
