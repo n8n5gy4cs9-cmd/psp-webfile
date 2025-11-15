@@ -1,0 +1,30 @@
+# Base Makefile that actually builds the PSP app inside the build/ directory.
+# This file is invoked from the top-level Makefile using:
+#   $(MAKE) -C build -f ../Makefile.base
+
+ROOT ?= ..
+
+TARGET = HelloWorld
+
+# Look for sources in project root; objects are emitted in current dir (build/)
+VPATH := $(ROOT)
+
+OBJS = main.o
+
+INCDIR = 
+CFLAGS = -O2 -G0 -Wall
+CXXFLAGS = $(CFLAGS) -fno-exceptions -fno-rtti
+ASFLAGS = $(CFLAGS)
+
+LIBDIR =
+LDFLAGS =
+LIBS = -lpsppower
+
+EXTRA_TARGETS = EBOOT.PBP
+PSP_EBOOT_TITLE = Hello World
+# Use menu assets from the project root
+PSP_EBOOT_ICON = $(ROOT)/assets/ICON0.PNG
+PSP_EBOOT_PIC1 = $(ROOT)/assets/PIC1.PNG
+
+PSPSDK=$(shell psp-config --pspsdk-path)
+include $(PSPSDK)/lib/build.mak
