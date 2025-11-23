@@ -8,10 +8,10 @@ all: build-dir
 	@if [ ! -f build/PARAM.SFO ]; then \
 	  if command -v mksfoex >/dev/null 2>&1; then \
 	    echo "Generating build/PARAM.SFO via mksfoex"; \
-	    mksfoex "Hello World" build/PARAM.SFO; \
+	    mksfoex "PSP Web File Browser" build/PARAM.SFO; \
 	  elif command -v mksfo >/dev/null 2>&1; then \
 	    echo "Generating build/PARAM.SFO via mksfo"; \
-	    mksfo "Hello World" build/PARAM.SFO; \
+	    mksfo "PSP Web File Browser" build/PARAM.SFO; \
 	  else \
 	    echo "Warning: mksfoex/mksfo not found; pack-pbp may fail"; \
 	  fi; \

@@ -10,6 +10,11 @@ header('Content-Type: text/plain');
 // Directory containing files for download
 $files_dir = __DIR__ . '/files/';
 
+// Debug: show what path we're checking
+// echo "Checking: $files_dir\n";
+// echo "Dir exists: " . (is_dir($files_dir) ? 'YES' : 'NO') . "\n";
+// echo "---\n";
+
 // Get list of files
 if (is_dir($files_dir)) {
     $files = scandir($files_dir);

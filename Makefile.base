@@ -22,9 +22,9 @@ LIBS = -lpsppower -lpspnet -lpspnet_inet -lpspnet_apctl -lpspnet_resolver -lpspu
 
 EXTRA_TARGETS = EBOOT.PBP
 PSP_EBOOT_TITLE = PSP Web File Browser
-# Use menu assets from the project root
-PSP_EBOOT_ICON = $(ROOT)/assets/ICON0.PNG
-PSP_EBOOT_PIC1 = $(ROOT)/assets/PIC1.PNG
+# Use menu assets from the project root (use NULL if files don't exist)
+PSP_EBOOT_ICON = $(if $(wildcard $(ROOT)/assets/ICON0.PNG),$(ROOT)/assets/ICON0.PNG,NULL)
+PSP_EBOOT_PIC1 = $(if $(wildcard $(ROOT)/assets/PIC1.PNG),$(ROOT)/assets/PIC1.PNG,NULL)
 
 PSPSDK=$(shell psp-config --pspsdk-path)
 include $(PSPSDK)/lib/build.mak
